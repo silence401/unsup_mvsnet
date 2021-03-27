@@ -1,0 +1,5 @@
+export NGPUS=1
+export save_results_dir="./checkpoints"
+./train.sh $NGPUS $save_results_dir  --ndepths "48,32,8"  --depth_inter_r "4,2,1"   --dlossw "0.5,1.0,2.0"  --batch_size 1 --eval_freq 3
+ps -ef|grep train.py|grep -v grep|cut -c 9-15|xargs kill -9
+./test.sh ./checkpoints/20210318_test_with_weights/model_000001.ckpt --interval_scale 1.06
