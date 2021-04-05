@@ -153,7 +153,7 @@ def save_depth(testlist):
 def save_scene_depth(testlist):
     # dataset, dataloader
     MVSDataset = find_dataset_def(args.dataset)
-    test_dataset = MVSDataset(args.testpath, testlist, "test", args.num_view, args.numdepth, Interval_Scale,
+    test_dataset = MVSDataset(args.testpath, args.testlist, "test", args.num_view, args.numdepth, Interval_Scale,
                               max_h=args.max_h, max_w=args.max_w, fix_res=args.fix_res)
     TestImgLoader = DataLoader(test_dataset, args.batch_size, shuffle=False, num_workers=4, drop_last=False)
 
@@ -179,7 +179,9 @@ def save_scene_depth(testlist):
             sample_cuda = tocuda(sample)
             start_time = time.time()
             outputs = model(sample_cuda["imgs"], sample_cuda["proj_matrices"], sample_cuda["depth_values"])
-        #    loss, loss_photo, loss_ssim, loss_smooth = model_loss(sample_cuda["imgs"], sample_cuda["proj_matrices"], outputs)
+            #outputs['depth'] = sample_cuda['depth'][]
+            #print(sample_cuda['depth']['stage1'].shape)
+            loss, loss_photo, loss_ssim, loss_smooth, loss_plane = model_loss(sample_cuda["imgs"], sample_cuda["proj_matrices"], outputs, sample_cuda['depth'])
             
 #             print("loss:", loss)
 #             print("loss_photo:", loss_photo)
@@ -188,17 +190,20 @@ def save_scene_depth(testlist):
             
             end_time = time.time()
             outputs = tensor2numpy(outputs)
+            depth_gt = tensor2numpy(sample_cuda['depth']['stage3']).squeeze(0)
+            #print("depth_gt.shape", depth_gt.shape)
             del sample_cuda
             filenames = sample["filename"]
             cams = sample["proj_matrices"]["stage{}".format(num_stage)].numpy()
             imgs = sample["imgs"].numpy()
-            import matplotlib.pyplot as plt
-            print("output weigths:", np.mean(outputs['weights']))
-            for i in range(4):
-                plt.imsave('{}'.format(i), outputs['weights'][:, i].squeeze(0))
+            #import matplotlib.pyplot as plt
+            #plt.imsave("depth_gt.png", depth_gt)
+#             print("output weigths:", np.mean(outputs['weights']))
+#             for i in range(4):
+#                 plt.imsave('{}'.format(i), outputs['weights'][:, i].squeeze(0))
             
             #print("outputs weights.shape:", outputs['weights'][0].shape)
-            import matplotlib.pyplot as plt
+            #import matplotlib.pyplot as plt
            # plt.imsave("weights.png", outputs['weights'].squeeze(0).squeeze(0))
             #plt.imsave("depth.png", outputs['depth'].squeeze(0).squeeze(0))
             
@@ -220,6 +225,8 @@ def save_scene_depth(testlist):
                 os.makedirs(img_filename.rsplit('/', 1)[0], exist_ok=True)
                 os.makedirs(ply_filename.rsplit('/', 1)[0], exist_ok=True)
                 #save depth maps
+                print("depth_est.shape", depth_gt.shape)
+                #depth_est = sample_cuda['depth']['stage3']
                 save_pfm(depth_filename, depth_est)
                 #save confidence maps
                 save_pfm(confidence_filename, photometric_confidence)
@@ -308,6 +315,7 @@ def check_geometric_consistency(depth_ref, intrinsics_ref, extrinsics_ref, depth
     relative_depth_diff = depth_diff / depth_ref
 
     mask = np.logical_and(dist < 1, relative_depth_diff < 0.01)
+    #mask = np.logical_and(dist < 1, relative_depth_diff < 0.1)
     depth_reprojected[~mask] = 0
 
     return mask, depth_reprojected, x2d_src, y2d_src
@@ -315,7 +323,8 @@ def check_geometric_consistency(depth_ref, intrinsics_ref, extrinsics_ref, depth
 
 def filter_depth(pair_folder, scan_folder, out_folder, plyfilename):
     # the pair file
-    pair_file = os.path.join(pair_folder, "pair.txt")
+    #pair_file = os.path.join(pair_folder, "pair.txt")
+    pair_file = os.path.join("/userhome/dtu_training/Cameras/", "pair.txt")
     # for the final point cloud
     vertexs = []
     vertex_colors = []
@@ -474,6 +483,7 @@ if __name__ == '__main__':
             if not args.testpath_single_scene else [os.path.basename(args.testpath_single_scene)]
 
     # step1. save all the depth maps and the masks in outputs directory
+    print(testlist)
     save_depth(testlist)
 
     # step2. filter saved depth maps with photometric confidence maps and geometric constraints

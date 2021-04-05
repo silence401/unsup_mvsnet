@@ -18,7 +18,15 @@ from config import args, device
 num_gpus = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
 is_distributed = num_gpus > 1
 print(is_distributed)
-
+def adjust_parameters(epoch):
+    if epoch == 2-1:
+        args.w_aug = 2 * args.w_aug
+    elif epoch == 4-1:
+        args.w_aug = 2 * args.w_aug
+    elif epoch == 6-1:
+        args.w_aug = 2 * args.w_aug
+    elif epoch == 8-1:
+        args.w_aug = 2 * args.w_aug
 # main function
 def train(model, model_loss, optimizer, TrainImgLoader, TestImgLoader, start_epoch, args):
     milestones = [int(epoch_idx) for epoch_idx in args.lrepochs.split(':')[0].split(',')]
@@ -30,6 +38,7 @@ def train(model, model_loss, optimizer, TrainImgLoader, TestImgLoader, start_epo
         global_step = len(TrainImgLoader) * epoch_idx
         #print(global_step)
         #lr_scheduler.step()
+        adjust_parameters(epoch_idx)
 
         # training
         for batch_idx, sample in enumerate(TrainImgLoader):
@@ -37,6 +46,10 @@ def train(model, model_loss, optimizer, TrainImgLoader, TestImgLoader, start_epo
             global_step = len(TrainImgLoader) * epoch_idx + batch_idx
             do_summary = global_step % args.summary_freq == 0
             loss, scalar_outputs, image_outputs, depth_est = train_sample(model, model_loss, optimizer, sample, args)
+            loss_photo = scalar_outputs["loss_photo"]
+            loss_smooth = scalar_outputs["loss_smooth"]
+            loss_ssim = scalar_outputs["loss_ssim"]
+            loss_plane = scalar_outputs["loss_plane"]
             #depth_est = image_outputs['depth_est']
             lr_scheduler.step()
             if (not is_distributed) or (dist.get_rank() == 0):
@@ -52,10 +65,12 @@ def train(model, model_loss, optimizer, TrainImgLoader, TestImgLoader, start_epo
                     save_scalars(logger, 'train', scalar_outputs, global_step)
                     save_images(logger, 'train', image_outputs, global_step)
                 del scalar_outputs, image_outputs
-            print("Epoch {}/{}, Iter {}/{}, lr {:.6f}, train loss = {:.3f}, augment_loss = {:.3f}, time = {:.3f}".format(
+            if (not is_distributed) or (dist.get_rank() == 0):
+                if do_summary or global_step == 1:
+                    print("Epoch {}/{}, Iter {}/{}, lr {:.6f}, train loss = {:.3f}, loss_photo = {:.3f}, loss_ssim = {:.3f}, loss_smooth = {:.3f}, augment_loss = {:.3f}, loss_plane = {:.3f}, time = {:.3f}".format(
                            epoch_idx, args.epochs, batch_idx, len(TrainImgLoader),
-                           optimizer.param_groups[0]["lr"], loss,
-                           augment_loss,
+                           optimizer.param_groups[0]["lr"], loss, loss_photo, loss_ssim, loss_smooth,
+                           augment_loss,loss_plane,
                            time.time() - start_time))
 
         # checkpoint
@@ -80,11 +95,11 @@ def train(model, model_loss, optimizer, TrainImgLoader, TestImgLoader, start_epo
                     if do_summary:
                         save_scalars(logger, 'test', scalar_outputs, global_step)
                         save_images(logger, 'test', image_outputs, global_step)
-                        print("Epoch {}/{}, Iter {}/{}, test loss = {:.3f}, photo_loss = {:.3f}, ssim_loss = {:.3f}, smooth_loss = {:.3f}, time = {:3f}".format(
+                        print("Epoch {}/{}, Iter {}/{}, test loss = {:.3f}, photo_loss = {:.3f}, ssim_loss = {:.3f}, smooth_loss = {:.3f}, loss_plane = {:.3f}, time = {:3f}".format(
                                                                             epoch_idx, args.epochs,
                                                                             batch_idx,
                                                                             len(TestImgLoader), loss,
-                                                                            scalar_outputs['loss_photo'], scalar_outputs['loss_ssim'], scalar_outputs['loss_smooth'],
+                                                                            scalar_outputs['loss_photo'], scalar_outputs['loss_ssim'], scalar_outputs['loss_smooth'],scalar_outputs["loss_plane"],
                                                                            # scalar_outputs["depth_loss"],
                                                                             time.time() - start_time))
                     avg_test_scalars.update(scalar_outputs)
@@ -134,12 +149,12 @@ def train_sample(model, model_loss, optimizer, sample, args):
 
     outputs = model(sample_cuda["imgs"], sample_cuda["proj_matrices"], sample_cuda["depth_values"])
     depth_est = outputs["depth"]
-    print("depth_est", depth_est.shape)
+    #print("depth_est", depth_est.shape)
     #print("====depth_est.shape========")
    # print(depth_est.shape)
     #features = outputs['features']
     #loss_dep
-    loss, loss_photo, loss_ssim, loss_smooth = model_loss(sample_cuda["imgs"], sample_cuda["proj_matrices"], outputs)
+    loss, loss_photo, loss_ssim, loss_smooth, loss_plane = model_loss(sample_cuda["imgs"], sample_cuda["proj_matrices"], outputs)
     #print("loss:",loss)
     #loss, depth_loss = model_loss(outputs, depth_gt_ms, mask_ms, dlossw=[float(e) for e in args.dlossw.split(",") if e])
 
@@ -151,16 +166,12 @@ def train_sample(model, model_loss, optimizer, sample, args):
         #print("a")
         loss.backward()
      
-   # optimizer.step()
-#     for name, param in model.named_parameters():
-#         if param.grad is None:
-#             print(name, param)
-#     os._exit(0)
-
+    optimizer.step()
     scalar_outputs = {"loss": loss,
                       "loss_photo": loss_photo,
                       "loss_ssim": loss_ssim,
                       "loss_smooth": loss_smooth,
+                      "loss_plane": loss_plane,
                       #"depth_loss": depth_loss,
                       "abs_depth_error": AbsDepthError_metrics(depth_est, depth_gt, mask > 0.5),
                       "thres2mm_error": Thres_metrics(depth_est, depth_gt, mask > 0.5, 2),
@@ -207,12 +218,18 @@ def train_sample_aug(sample, depth_est, detailed_summary=False):
 
     # step 2 数据增强一致性训练
     # 数据增强(光照调整/gamma校正，随机噪声，随机mask)
-    ref_img, filter_mask = random_image_mask(ref_img, filter_size=(ref_img.size(2)//3, ref_img.size(3)//3))
+    scale_factor = np.random.randint(3, 6) 
+    ref_img, filter_mask = random_image_mask(ref_img, filter_size=(ref_img.size(2)//scale_factor, ref_img.size(3)//scale_factor))
     #print("ref_img:", ref_img)
     imgs_aug[:, 0] = ref_img
+#     print(ref_img.shape)
+#     from matplotlib import pyplot as plt
+#     plt.imsave("augimg.png", ref_img.cpu().detach().squeeze(0).permute(1,2,0))
+#     plt.imsave("augimg2.png", imgs_aug[:,1].cpu().detach().squeeze(0).permute(1,2,0))
+    
     outputs_aug = model(imgs_aug, sample_cuda["proj_matrices"], sample_cuda["depth_values"])
     depth_est_aug = outputs_aug["depth"]
-    print("depth_est_aug.shape", depth_est_aug.shape)
+    #print("depth_est_aug.shape", depth_est_aug.shape)
     # 数据增强损失
     #filter_mask = F.interpolate(filter_mask, scale_factor=0.25)
     filter_mask = filter_mask[:, 0, :, :]
@@ -220,8 +237,8 @@ def train_sample_aug(sample, depth_est, detailed_summary=False):
     # print('depth_est_aug: {} depth_est: {}'.format(depth_est_aug.shape, depth_est.shape))
     #loss, loss_photo, loss_ssim, loss_smooth = model_loss(sample_cuda["imgs"], sample_cuda["proj_matrices"], outputs_aug)
     augment_loss = Aug_loss(depth_est_aug, depth_est, filter_mask)
-#     print('augment_loss: {}'.format(augment_loss))
-    augment_loss = augment_loss * 0.01
+    #print('augment_loss: {}'.format(augment_loss))
+    augment_loss = augment_loss * args.w_aug
     
     if is_distributed and args.using_apex:
         with amp.scale_loss(augment_loss, optimizer) as scaled_loss:
@@ -243,6 +260,8 @@ def train_sample_aug(sample, depth_est, detailed_summary=False):
     # print('ref_img: {}'.format(sample["imgs"][:, 0].shape))
     # print('mask: {}'.format(sample["mask"].shape))
     #print(type(depth_est_aug))
+    if is_distributed:
+        scalar_outputs = reduce_scalar_outputs(scalar_outputs)
     image_outputs = {"depth_est_aug": depth_est_aug * mask * filter_mask}
 
     return tensor2float(augment_loss), tensor2float(scalar_outputs), image_outputs
@@ -266,13 +285,14 @@ def test_sample_depth(model, model_loss, sample, args):
     outputs = model_eval(sample_cuda["imgs"], sample_cuda["proj_matrices"], sample_cuda["depth_values"])
     depth_est = outputs["depth"]
     #loss = model_loss(sample_cuda["imgs"], sample_cuda["features"], sample_cuda["proj_matrices"], depth_est)
-    loss, loss_photo, loss_ssim, loss_smooth = model_loss(sample_cuda["imgs"], sample_cuda["proj_matrices"], outputs)
+    loss, loss_photo, loss_ssim, loss_smooth, loss_plane = model_loss(sample_cuda["imgs"], sample_cuda["proj_matrices"], outputs)
     #loss, depth_loss = model_loss(outputs, depth_gt_ms, mask_ms, dlossw=[float(e) for e in args.dlossw.split(",") if e])
 
     scalar_outputs = {"loss": loss,
                       "loss_photo": loss_photo,
                       "loss_ssim": loss_ssim,
                       "loss_smooth": loss_smooth,
+                      "loss_plane": loss_plane,
                      # "depth_loss": depth_loss,
                       "abs_depth_error": AbsDepthError_metrics(depth_est, depth_gt, mask > 0.5),
                       "thres2mm_error": Thres_metrics(depth_est, depth_gt, mask > 0.5, 2),
@@ -441,7 +461,7 @@ if __name__ == '__main__':
 
     # dataset, dataloader
     MVSDataset = find_dataset_def(args.dataset)
-    train_dataset = MVSDataset(args.trainpath, args.trainlist, "train", 4, args.numdepth, args.interval_scale)
+    train_dataset = MVSDataset(args.trainpath, args.trainlist, "train", 5, args.numdepth, args.interval_scale)
     test_dataset = MVSDataset(args.testpath, args.testlist, "test", 5, args.numdepth, args.interval_scale)
 
     if is_distributed:

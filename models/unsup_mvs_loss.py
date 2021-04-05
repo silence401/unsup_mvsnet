@@ -31,7 +31,7 @@ class UnSupLoss(nn.Module):
         }
         self.depth_loss_weight = kwargs.get("dlossw", None)
         
-    def forward(self, imgs, cams, outputs):
+    def forward(self, imgs, cams, outputs, depth_gt=None):
         index = 0
         #imgs [{stage1, stage2, stage3},{}]
         #depth_loss_weight = args.get("dlossw", None)
@@ -75,7 +75,9 @@ class UnSupLoss(nn.Module):
                 
                 
                 depth = stage_inputs['depth']
+                #depth_rand = torch.randn(depth.shape).to(depth.device)
                 #depth = depth_gt[stage_key]
+                #print("depth.shape", depth.shape)
                 #print('depth.shape:', depth.shape)
                 #depth2 = torch.zeros_like(depth).to(depth.device)
                 #depth2 = torch.randn(depth.shape).to(depth.device)
@@ -91,7 +93,9 @@ class UnSupLoss(nn.Module):
                 weight = weights_stage[:, view-1].unsqueeze(1)
                 #print("weigth_stage", weight.shape)
                 warped_src_img, mask = inverse_warping(src_img_stage, ref_cam, src_cam, depth)
-                
+#                 mask = mask_gt
+#                 mask = mask.unsqueeze(0)
+                #print(mask_gt.shape)
                 #loss_mask = compute_mask_loss(mask)
                 
                # print("warped_src_img.shape:", warped_src_img.shape)
@@ -99,12 +103,12 @@ class UnSupLoss(nn.Module):
                 
                 #print("warped_src_img.shape", warped_src_img.shape)
                 #print("mask.shape", mask.shape)
-                #print(ref_img.shape)
-#                 if stage_idx == 2:
-#                     plt.imsave('ref_img'+stage_key+'.png', ref_img.cpu().detach().numpy().squeeze(0).transpose(1, 2, 0))
-#                     plt.imsave('depth'+stage_key+'.png', depth.cpu().detach().numpy().squeeze(0))
-#                     plt.imsave('mask'+stage_key+'.png', mask.cpu().detach().numpy().squeeze(0).squeeze(0))
-#                     plt.imsave('warped_src'+stage_key+'.png', warped_src_img.cpu().detach().numpy().squeeze(0).transpose(1, 2, 0))
+#                 #print(ref_img.shape)
+                if stage_idx == 2:
+                    plt.imsave('est/ref_img'+stage_key+'11.png', ref_img.cpu().detach().numpy().squeeze(0).transpose(1, 2, 0))
+                    plt.imsave('est/depth'+stage_key+'11.png', depth.cpu().detach().numpy().squeeze(0)*mask.cpu().detach().numpy().squeeze(0).squeeze(0))
+                    plt.imsave('est/mask'+stage_key+'11.png', mask.cpu().detach().numpy().squeeze(0).squeeze(0))
+                    plt.imsave('est/warped_src'+stage_key+'11.png', warped_src_img.cpu().detach().numpy().squeeze(0).transpose(1, 2, 0)*mask.cpu().detach().numpy().squeeze(0).transpose(1, 2, 0))
                 #cv2.imwrite('src_img'+stage_key+'_{:d}.png'.format(index), src_img.cpu().detach().numpy().squeeze(0).transpose(1, 2, 0)*255)
                 #cv2.imwrite('mask'+stage_key+'_{:d}.png'.format(1), mask.cpu().detach().numpy()[0].transpose(1, 2, 0)*255)
                 #cv2.imwrite('mask'+stage_key+'_{:d}.png'.format(2), mask.cpu().detach().numpy()[1].transpose(1, 2, 0)*255)
@@ -119,6 +123,9 @@ class UnSupLoss(nn.Module):
 
 
                 if view == 1 and stage_idx == 2:
+                    ref_3d_map = get_3d_map(depth, ref_cam[:, 1, :3, :3])
+                    loss_plane = local_plane_loss(ref_3d_map)
+                    #print("loss_plane:", loss_plane)
                     loss_smooth += depth_smoothness(depth.unsqueeze(dim=1), ref_img_stage, args.smooth_lambda)
 #                 print("============stage_key{}======".format(stage_key))
 #                 print(loss_photo)
@@ -127,13 +134,13 @@ class UnSupLoss(nn.Module):
                     
                 
 
-#         print("loss_photo:", 50*loss_photo)
-#         print("loss_ssim:",  1*loss_ssim)
-#         print("loss_smmoth:", 1*loss_smooth)
-#         print("loss_mask:", 6*loss_mask)
-        print("5*loss_photo + 0.3*loss_ssim + 0.018*loss_smooth:", 50*loss_photo + 1*loss_ssim + 1*loss_smooth)
+#         print("loss_photo:", loss_photo)
+#         print("loss_ssim:",  loss_ssim)
+#         print("loss_smmoth:", loss_smooth)
+        #print("loss_mask:", 6*loss_mask)
+        #print("5*loss_photo + 0.3*loss_ssim + 0.018*loss_smooth:", 50*loss_photo + 1*loss_ssim + 1*loss_smooth)
         #return 50*loss_photo + 6*loss_ssim + 0.18*loss_smooth, loss_photo, loss_ssim, loss_smooth
-        return 80*loss_photo + 2*loss_ssim + 0.1*loss_smooth, loss_photo, loss_ssim, loss_smooth
+        return 100*loss_photo + 3*loss_ssim + 0.1*loss_smooth + 0.8*loss_plane, loss_photo, loss_ssim, loss_smooth, loss_plane
 
 #change the [{}, {}] to {}
 # def update_dict(cams, idx):
@@ -214,17 +221,22 @@ def gradient(pred):
     D_dx = pred[:, :, 1:, :] - pred[:, :, :-1, :]
     return D_dx, D_dy
 
-def depth_smoothness(depth, img, lambda_wt=1):
+def depth_smoothness(depth, img, lambda_wt=100):
     """Computes image-aware depth smoothness loss."""
     #print("depth_startshape:", depth.shape)
     depth_dx = gradient_x(depth)
     depth_dy = gradient_y(depth)
     image_dx = gradient_x(img)
     image_dy = gradient_y(img)
-    #plt.imsave("image_dx.png", image_dx.cpu().detach().squeeze(0).permute(1, 2, 0).numpy())
-    #plt.imsave("image_dy.png", image_dy.cpu().detach().squeeze(0).permute(1, 2, 0).numpy())
+#     plt.imsave("est/image_dx.png", image_dx.cpu().detach().squeeze(0).permute(1, 2, 0).numpy())
+#     plt.imsave("est/image_dy.png", image_dy.cpu().detach().squeeze(0).permute(1, 2, 0).numpy())
     weights_x = torch.exp(-(lambda_wt * torch.mean(torch.abs(image_dx), 1, keepdim=True)))
     weights_y = torch.exp(-(lambda_wt * torch.mean(torch.abs(image_dy), 1, keepdim=True)))
+    #print("weights:", image_dx.cpu().detach().squeeze(0).permute(1, 2, 0).numpy().shape)
+#     plt.imsave("est/depth_dx.png", depth_dx.cpu().detach().squeeze(0).squeeze(0).numpy())
+#     plt.imsave("est/depth_dy.png", depth_dy.cpu().detach().squeeze(0).squeeze(0).numpy())
+#     plt.imsave("est/weights_x.png", weights_x.cpu().detach().squeeze(0).squeeze(0).numpy())
+#     plt.imsave("est/weights_y.png", weights_y.cpu().detach().squeeze(0).squeeze(0).numpy())
    # print("depth_dx:", depth_dx.shape)
    # print("weight_dx:", weights_x.shape)
     smoothness_x = depth_dx * weights_x
@@ -266,6 +278,56 @@ def compute_mask_loss(mask):
 #     return torch.mean((sum_.float() - mask_.float())/h/w)
     return F.smooth_l1_loss(sum_, mask, reduction='mean')
 
+
+def get_3d_map(depth_est, ref_intrinsics):
+   # print("depth.shape:", depth_est.shape)
+    b, h, w = depth_est.shape
+    y_ref, x_ref = torch.meshgrid([torch.arange(0, h, dtype=torch.float32, device=depth_est.device), torch.arange(0, w, dtype=torch.float32, device=depth_est.device)])
+    y_ref, x_ref = y_ref.contiguous(), x_ref.contiguous()
+    y_ref, x_ref = y_ref.view(h*w), x_ref.view(h*w)
+    xyz_ref = torch.matmul(torch.inverse(ref_intrinsics), torch.stack((x_ref, y_ref, torch.ones_like(x_ref))).unsqueeze(0) * depth_est.view(b, -1).unsqueeze(1))
+    xyz_ref  = xyz_ref.view(b, 3, h, w)
+    return xyz_ref
+
+def local_plane_loss(xyz_ref):
+    #xyz_ref [b,3,h,w]
+    #-x-1
+    xyz_normal1 = xyz_ref[:, :, :-1, :] - xyz_ref[:, :, 1:, :]
+    xyz_normal1 = xyz_normal1[:, :, 1:, 1:-1]
+    #-y-1
+    xyz_normal2 = xyz_ref[:, :, 1:, :] - xyz_ref[:, :, :-1, :]
+    xyz_normal2 = xyz_normal2[:, :, :-1, 1:-1]
+    #-x+1
+    xyz_normal3 = xyz_ref[:, :, :, :-1] - xyz_ref[:, :, :, 1:]
+    xyz_normal3 = xyz_normal3[:, :, 1:-1, 1:]
+    #-x-1
+    xyz_normal4 = xyz_ref[:, :, :, 1:] - xyz_ref[:, :, :, :-1]
+    xyz_normal4 = xyz_normal4[:, :, 1:-1, :-1]
+    #x-1 y-1
+    xyz_normal5 = xyz_ref[:, :, 1:, 1:] - xyz_ref[:, :, :-1, :-1]
+    xyz_normal5 = xyz_normal5[:, :, :-1, :-1]
+    #x+1, y-1
+    xyz_normal6 = xyz_ref[:, :, :-1, 1:] - xyz_ref[:, :, 1:, :-1]
+    xyz_normal6 = xyz_normal6[:, :, 1:, :-1]
+    #x+1, y+1
+    xyz_normal7 = xyz_ref[:, :, :-1, :-1] - xyz_ref[:, :, 1:, 1:]
+    xyz_normal7 = xyz_normal7[:, :, 1:, 1:]
+    #x-1 y+1
+    xyz_normal8 = xyz_ref[:, :, 1:, :-1] - xyz_ref[:, :, :-1, 1:]
+    xyz_normal8 = xyz_normal8[:, :, :-1, 1:]
+    
+    #print("xyz_normal.shape", xyz_normal1.shape)
+    plane1 = torch.cross(xyz_normal1, xyz_normal3)
+    plane2 = torch.cross(xyz_normal2, xyz_normal4)
+
+    plane3 = torch.cross(xyz_normal5, xyz_normal6)
+    plane4 = torch.cross(xyz_normal7, xyz_normal8)
+    #sprint(plane1.shape)
+
+    plane_normal1 = (plane1 + plane2)/2
+    plane_normal2 = (plane3 + plane4)/2
+    #print(torch.mean(torch.cosine_similarity(plane_normal1, plane_normal2)))
+    return torch.mean(torch.abs(torch.cosine_similarity(plane_normal1, plane_normal2)))
     
 
 if __name__ == '__main__':
